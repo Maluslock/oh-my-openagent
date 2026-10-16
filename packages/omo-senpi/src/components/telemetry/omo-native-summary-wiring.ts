@@ -41,6 +41,7 @@ export function createNativeSummaryRecorder(input: {
   readonly rawTurnSampleRate?: number
   readonly isPidAlive?: (pid: number) => boolean
   readonly diagnostics?: (input: TelemetryDiagnosticInput) => void
+  readonly loadRecovery?: SessionSummaryOptions["loadRecovery"]
 }): SessionSummaryRecorder {
   const { state, env } = input
   let sampleRate = input.rawTurnSampleRate
@@ -57,6 +58,7 @@ export function createNativeSummaryRecorder(input: {
     // The sink is fixed to PostHog until `telemetry.sink` exists; the collector sink forces 1.
     sampleRate: () => (sampleRate ??= resolveRawTurnSampleRate({ sink: "posthog", configured: configuredSampleRate(input.cwd, env), env })),
     ...(input.diagnostics === undefined ? {} : { diagnostics: input.diagnostics }),
+    ...(input.loadRecovery === undefined ? {} : { loadRecovery: input.loadRecovery }),
   })
 }
 

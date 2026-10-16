@@ -20,6 +20,7 @@ import {
 export { withRecoveryOps } from "./session-summary-recovery-storage"
 export { publishThroughState, sendSummaryRecord } from "./session-summary-delivery"
 export { adoptForeignWindow } from "./session-summary-adopt"
+export { purgeOptedOutQueue } from "./session-summary-optout-purge"
 export { createImmediateSender } from "@oh-my-opencode/telemetry-core"
 
 export type SummaryRecovery = {
