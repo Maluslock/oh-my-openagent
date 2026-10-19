@@ -10,8 +10,10 @@ import {
 import {
   LEGACY_PLUGIN_NAME,
   PLUGIN_NAME,
+  V2_CLIENT_CONFIG_SCHEMA,
   getOpenCodeConfigDir,
   parseJsonc,
+  resolveClientConfigTarget,
 } from "../../shared"
 import { writeFileAtomically } from "../../shared/write-file-atomically"
 
@@ -19,6 +21,8 @@ type ConfigShape = {
   plugin?: unknown
   [key: string]: unknown
 }
+
+type ClientConfigKey = "plugin" | "plugins"
 
 export type EnsureTuiPluginEntryResult = {
   readonly changed: boolean
@@ -47,14 +51,16 @@ function readServerConfig(configDir: string): ConfigShape | null {
   return null
 }
 
-function pluginEntries(config: ConfigShape): unknown[] {
-  if (Array.isArray(config.plugin)) return config.plugin
-  if (typeof config.plugin === "string") return [config.plugin]
+function pluginEntries(config: ConfigShape, key: ClientConfigKey = "plugin"): unknown[] {
+  const value = config[key]
+  if (Array.isArray(value)) return value
+  if (typeof value === "string") return [value]
   return []
 }
 
-function pluginFieldInvalid(config: ConfigShape): boolean {
-  return config.plugin !== undefined && !Array.isArray(config.plugin) && typeof config.plugin !== "string"
+function pluginFieldInvalid(config: ConfigShape, key: ClientConfigKey = "plugin"): boolean {
+  const value = config[key]
+  return value !== undefined && !Array.isArray(value) && typeof value !== "string"
 }
 
 function serverPluginEntry(config: ConfigShape): string | undefined {
@@ -78,11 +84,11 @@ function desiredTuiEntry(serverEntry: string): string | null {
   return null
 }
 
-function readTuiConfig(tuiJsonPath: string): { config: ConfigShape; malformed: boolean } {
-  if (!existsSync(tuiJsonPath)) {
+function readClientConfig(configPath: string): { config: ConfigShape; malformed: boolean } {
+  if (!existsSync(configPath)) {
     return { config: {}, malformed: false }
   }
-  const config = readConfig(tuiJsonPath)
+  const config = readConfig(configPath)
   return config ? { config, malformed: false } : { config: {}, malformed: true }
 }
 
@@ -90,7 +96,7 @@ function formatConfig(config: ConfigShape): string {
   return `${JSON.stringify(config, null, 2)}\n`
 }
 
-export function ensureTuiPluginEntry(opts: { configDir?: string } = {}): EnsureTuiPluginEntryResult {
+export function ensureTuiPluginEntry(opts: { configDir?: string; hostVersion?: string | null } = {}): EnsureTuiPluginEntryResult {
   const configDir = opts.configDir ?? getOpenCodeConfigDir({ binary: "opencode", version: null })
   const serverConfig = readServerConfig(configDir)
   const serverEntry = serverConfig ? serverPluginEntry(serverConfig) : undefined
@@ -103,9 +109,9 @@ export function ensureTuiPluginEntry(opts: { configDir?: string } = {}): EnsureT
     return { changed: false, reason: "no-server-entry" }
   }
 
-  const tuiJsonPath = join(configDir, "tui.json")
-  const { config, malformed } = readTuiConfig(tuiJsonPath)
-  if (malformed || pluginFieldInvalid(config)) {
+  const target = resolveClientConfigTarget(configDir, opts.hostVersion)
+  const { config, malformed } = readClientConfig(target.path)
+  if (malformed || pluginFieldInvalid(config, target.key)) {
     return { changed: false, reason: "malformed" }
   }
 
@@ -113,16 +119,22 @@ export function ensureTuiPluginEntry(opts: { configDir?: string } = {}): EnsureT
   // an entry an older installer wrote (`<pkg>@latest`, the legacy package name,
   // the `<pkg>/tui` subpath) cannot survive alongside the one written now and
   // load the plugin twice. Foreign entries keep their position and shape.
-  const entries = pluginEntries(config)
+  const entries = pluginEntries(config, target.key)
   const otherEntries = entries.filter((entry) => !isOmoManagedTuiEntry(entry))
-  const pluginIsArray = Array.isArray(config.plugin)
+  const clientIsArray = Array.isArray(config[target.key])
   const isOnlyDesiredEntry =
-    pluginIsArray && entries.length === otherEntries.length + 1 && entries.includes(desiredEntry)
+    clientIsArray && entries.length === otherEntries.length + 1 && entries.includes(desiredEntry)
   if (isOnlyDesiredEntry) {
     return { changed: false, reason: "already-present" }
   }
 
+  const next: ConfigShape = target.v2
+    // The host adds `$schema` when it creates or migrates this file; do the same so a fresh install
+    // gets validation and autocomplete without waiting for a client start.
+    ? { $schema: V2_CLIENT_CONFIG_SCHEMA, ...config, [target.key]: [...otherEntries, desiredEntry] }
+    : { ...config, [target.key]: [...otherEntries, desiredEntry] }
+
   mkdirSync(configDir, { recursive: true })
-  writeFileAtomically(tuiJsonPath, formatConfig({ ...config, plugin: [...otherEntries, desiredEntry] }))
+  writeFileAtomically(target.path, formatConfig(next))
   return { changed: true, reason: "added" }
 }

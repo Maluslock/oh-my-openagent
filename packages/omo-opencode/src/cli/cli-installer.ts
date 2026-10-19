@@ -115,7 +115,7 @@ export async function runCliInstaller(args: InstallArgs, version: string): Promi
       `Plugin ${isUpdate ? "verified" : "added"} ${SYMBOLS.arrow} ${color.dim(pluginResult.configPath)}`,
     )
     try {
-      ensureTuiPluginEntry()
+      ensureTuiPluginEntry({ hostVersion: await getOpenCodeVersion() })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       printWarning(`Could not update OpenCode TUI config: ${message}`)

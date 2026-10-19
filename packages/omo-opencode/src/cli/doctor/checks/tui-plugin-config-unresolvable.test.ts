@@ -3,8 +3,16 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PLUGIN_NAME } from "../../../shared"
+import { PLUGIN_NAME, getOpenCodeVersion, setVersionCache } from "../../../shared"
 import { checkTuiPluginConfig } from "./tui-plugin-config"
+
+// The version cache is process-global: restore what we inherited rather than resetting it.
+let previousVersion: string | null = null
+
+function pinVersion(version: string): void {
+  previousVersion = getOpenCodeVersion()
+  setVersionCache(version)
+}
 
 let testConfigDir: string
 let originalConfigDir: string | undefined
@@ -27,6 +35,8 @@ function writeTuiConfig(plugins: readonly string[]): void {
 
 describe("tui-plugin-config unresolvable named entries", () => {
   beforeEach(() => {
+    // 1.x pins tui.json; the 2.x path targets cli.json and has its own cases.
+    pinVersion("1.5.0")
     originalConfigDir = process.env.OPENCODE_CONFIG_DIR
     testConfigDir = join(
       tmpdir(),
@@ -37,6 +47,7 @@ describe("tui-plugin-config unresolvable named entries", () => {
   })
 
   afterEach(() => {
+    setVersionCache(previousVersion)
     rmSync(testConfigDir, { recursive: true, force: true })
     if (originalConfigDir === undefined) {
       delete process.env.OPENCODE_CONFIG_DIR

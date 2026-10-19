@@ -3,9 +3,17 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PLUGIN_NAME } from "../../../shared"
+import { PLUGIN_NAME, getOpenCodeVersion, setVersionCache } from "../../../shared"
 import { ensureTuiPluginEntry } from "../../config-manager/add-tui-plugin-to-tui-config"
 import { checkTuiPluginConfig } from "./tui-plugin-config"
+
+// The version cache is process-global: restore what we inherited rather than resetting it.
+let previousVersion: string | null = null
+
+function pinVersion(version: string): void {
+  previousVersion = getOpenCodeVersion()
+  setVersionCache(version)
+}
 
 let testConfigDir: string
 let originalConfigDir: string | undefined
@@ -48,6 +56,8 @@ function writeInstalledPackage(packageName: string, exportsValue?: Record<string
 
 describe("tui-plugin-config check", () => {
   beforeEach(() => {
+    // 1.x pins tui.json; the 2.x path targets cli.json and has its own cases.
+    pinVersion("1.5.0")
     originalConfigDir = process.env.OPENCODE_CONFIG_DIR
     testConfigDir = join(
       tmpdir(),
@@ -58,6 +68,7 @@ describe("tui-plugin-config check", () => {
   })
 
   afterEach(() => {
+    setVersionCache(previousVersion)
     rmSync(testConfigDir, { recursive: true, force: true })
     if (originalConfigDir === undefined) {
       delete process.env.OPENCODE_CONFIG_DIR
@@ -321,6 +332,20 @@ describe("tui-plugin-config check", () => {
     // then
     expect(result.status).toBe("pass")
     expect(result.issues).toHaveLength(0)
+  })
+
+  it("passes on OpenCode 2.x when the entry lives in cli.json", async () => {
+    //#given a 2.x host whose entry is in the global client config
+    pinVersion("2.0.11")
+    writeOpenCodeConfig([PLUGIN_NAME])
+    writeFileSync(join(testConfigDir, "cli.json"), JSON.stringify({ plugins: [PLUGIN_NAME] }, null, 2) + "\n", "utf-8")
+
+    //#when running the check
+    const result = await checkTuiPluginConfig()
+
+    //#then the 2.x client config is inspected instead of tui.json
+    expect(result.status).toBe("pass")
+    expect(result.details?.some((line) => line.startsWith("cli.json:"))).toBe(true)
   })
 
   it("passes when legacy server entry is paired with legacy TUI package entry", async () => {

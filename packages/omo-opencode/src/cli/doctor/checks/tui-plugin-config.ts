@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
 import {
   ACCEPTED_PACKAGE_NAMES,
@@ -10,6 +10,7 @@ import {
   isPluginTupleEntry,
   log,
   parseJsonc,
+  resolveClientConfigTarget,
 } from "../../../shared"
 import { CHECK_IDS, CHECK_NAMES } from "../framework/constants"
 import type { CheckResult, DoctorIssue } from "../framework/types"
@@ -23,6 +24,7 @@ interface OpenCodeConfigShape {
 
 interface TuiConfigShape {
   plugin?: (string | [string, unknown])[]
+  plugins?: (string | [string, unknown])[]
 }
 
 interface ServerPluginInfo {
@@ -199,7 +201,9 @@ export function detectServerPluginRegistration(): ServerPluginInfo {
 }
 
 export function detectTuiPluginRegistration(): TuiPluginInfo {
-  const tuiJsonPath = join(getOpenCodeConfigDir({ binary: "opencode" }), "tui.json")
+  // 1.x reads tui.json (`plugin`); 2.x reads cli.json (`plugins`). See shared/opencode-client-config.
+  const target = resolveClientConfigTarget(getOpenCodeConfigDir({ binary: "opencode" }))
+  const tuiJsonPath = target.path
   if (!existsSync(tuiJsonPath)) {
     return {
       registered: false,
@@ -214,7 +218,7 @@ export function detectTuiPluginRegistration(): TuiPluginInfo {
 
   try {
     const parsed = parseJsonc<TuiConfigShape>(readFileSync(tuiJsonPath, "utf-8"))
-    const plugins = parsed.plugin ?? []
+    const plugins = parsed[target.key] ?? []
     return {
       registered: plugins.some(isTuiPluginEntry),
       configPath: tuiJsonPath,
@@ -247,9 +251,11 @@ export async function checkTuiPluginConfig(): Promise<CheckResult> {
   const tui = detectTuiPluginRegistration()
   const issues: DoctorIssue[] = []
   const details: string[] = []
+  const clientConfigName = basename(tui.configPath ?? "tui.json")
+  const clientConfigKey = clientConfigName === "cli.json" ? "plugins" : "plugin"
 
   if (server.configPath) details.push(`opencode.json: ${server.configPath}`)
-  if (tui.configPath) details.push(`tui.json: ${tui.configPath}`)
+  if (tui.configPath) details.push(`${clientConfigName}: ${tui.configPath}`)
 
   if (!server.registered && !tui.registered) {
     return {
@@ -269,20 +275,20 @@ export async function checkTuiPluginConfig(): Promise<CheckResult> {
         : `does not export "${TUI_EXPORT_SUBPATH}"`
     const desiredEntry = server.entry ?? PLUGIN_NAME
     issues.push({
-      title: "TUI plugin entry in tui.json is unresolvable",
+      title: `TUI plugin entry in ${clientConfigName} is unresolvable`,
       description:
-        `tui.json contains "${PLUGIN_NAME}/${TUI_SUBPATH}" or "${LEGACY_PLUGIN_NAME}/${TUI_SUBPATH}". `
+        `${clientConfigName} contains "${PLUGIN_NAME}/${TUI_SUBPATH}" or "${LEGACY_PLUGIN_NAME}/${TUI_SUBPATH}". `
         + `The server package ${exportStatus}. `
         + "OpenCode installs the configured package spec before resolving the TUI export, so "
         + `the TUI config should use "${desiredEntry}" instead of the package subpath.`,
-      fix: `Remove "${PLUGIN_NAME}/${TUI_SUBPATH}" and "${LEGACY_PLUGIN_NAME}/${TUI_SUBPATH}" from the "plugin" array in ${tui.configPath}, then add "${desiredEntry}".`,
+      fix: `Remove "${PLUGIN_NAME}/${TUI_SUBPATH}" and "${LEGACY_PLUGIN_NAME}/${TUI_SUBPATH}" from the "${clientConfigKey}" array in ${tui.configPath}, then add "${desiredEntry}".`,
       affects: ["TUI startup", "plugin loading"],
       severity: "warning",
     })
     return {
       name,
       status: "warn",
-      message: "TUI plugin entry in tui.json is unresolvable",
+      message: `TUI plugin entry in ${clientConfigName} is unresolvable`,
       details: details.length > 0 ? details : undefined,
       issues,
     }
@@ -293,8 +299,8 @@ export async function checkTuiPluginConfig(): Promise<CheckResult> {
       title: "TUI plugin package does not expose ./tui",
       description:
         `The installed ${server.entry ?? PLUGIN_NAME} package registered in opencode.json does not export "${TUI_EXPORT_SUBPATH}", `
-        + "but tui.json contains the package entry for TUI loading.",
-      fix: `Remove "${server.entry ?? PLUGIN_NAME}" from the "plugin" array in ${tui.configPath}, or update the installed package to a version that exports "${TUI_EXPORT_SUBPATH}".`,
+        + `but ${clientConfigName} contains the package entry for TUI loading.`,
+      fix: `Remove "${server.entry ?? PLUGIN_NAME}" from the "${clientConfigKey}" array in ${tui.configPath}, or update the installed package to a version that exports "${TUI_EXPORT_SUBPATH}".`,
       affects: ["TUI sidebar", "TUI commands"],
       severity: "warning",
     })
@@ -340,20 +346,20 @@ export async function checkTuiPluginConfig(): Promise<CheckResult> {
     }
 
     issues.push({
-      title: "TUI plugin entry missing from tui.json",
+      title: `TUI plugin entry missing from ${clientConfigName}`,
       description:
         "The server plugin is registered in opencode.json, but the TUI plugin entry "
-        + `("${server.entry ?? PLUGIN_NAME}") is missing from tui.json. The Roles · `
+        + `("${server.entry ?? PLUGIN_NAME}") is missing from ${clientConfigName}. The Roles · `
         + "Models sidebar section and TUI-only commands will not appear.",
-      fix: "Re-run the installer (`npx oh-my-openagent install`) to auto-write tui.json, "
-        + `or add "${server.entry ?? PLUGIN_NAME}" to the "plugin" array in ${tui.configPath}.`,
+      fix: `Re-run the installer (\`npx oh-my-openagent install\`) to auto-write ${clientConfigName}, `
+        + `or add "${server.entry ?? PLUGIN_NAME}" to the "${clientConfigKey}" array in ${tui.configPath}.`,
       affects: ["TUI sidebar", "TUI commands"],
       severity: "warning",
     })
     return {
       name,
       status: "warn",
-      message: "TUI plugin entry missing from tui.json",
+      message: `TUI plugin entry missing from ${clientConfigName}`,
       details: details.length > 0 ? details : undefined,
       issues,
     }
@@ -363,7 +369,7 @@ export async function checkTuiPluginConfig(): Promise<CheckResult> {
     issues.push({
       title: "Server plugin entry missing from opencode.json",
       description:
-        `The TUI plugin entry ("${PLUGIN_NAME}") is registered in tui.json, `
+        `The TUI plugin entry ("${PLUGIN_NAME}") is registered in ${clientConfigName}, `
         + "but the server plugin (oh-my-openagent) is missing from opencode.json. "
         + "The plugin cannot function correctly without both halves — the server side "
         + "handles tool dispatch, hook execution, and SDK integration.",
