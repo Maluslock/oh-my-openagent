@@ -69,7 +69,11 @@ export function syncTaskToTodo(task: Task): TodoInfo | null {
   };
 }
 
+/** `opencode/session/todo` cannot resolve on V2, so its failure is logged once, not per call. */
+let todoWriterUnavailable = false
+
 async function resolveTodoWriter(): Promise<TodoWriter | null> {
+  if (todoWriterUnavailable) return null
   try {
     const loader = "opencode/session/todo";
     const mod = await import(loader);
@@ -78,7 +82,8 @@ async function resolveTodoWriter(): Promise<TodoWriter | null> {
       return update as TodoWriter;
     }
   } catch (err) {
-    log("[todo-sync] Failed to resolve Todo.update", { error: String(err) });
+    todoWriterUnavailable = true;
+    log("[todo-sync] Todo.update is unavailable, so task updates are not mirrored into host todos", { error: String(err) });
   }
   return null;
 }
