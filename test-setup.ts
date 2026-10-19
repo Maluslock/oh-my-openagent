@@ -40,8 +40,14 @@ setDefaultTimeout(process.platform === "win32" ? 30_000 : 20_000)
 
 // Skill/agent/command discovery reads the developer's real HOME, and the engine's agent dir falls
 // back to os.homedir(). Both point at one per-process temp home; see test-hermetic-home.ts.
-installHermeticHome()
+const hermeticHome = installHermeticHome()
 delete process.env.OPENCODE_SERVER_PASSWORD
+
+// Session enumeration reads the host's SQLite store (`session-manager/sqlite-storage.ts`), whose
+// default path resolves through os.homedir() and therefore ignores the hermetic HOME above. Point it
+// inside that temp dir so suites never see the developer's real sessions; a test that wants a store
+// creates one and sets OMO_SESSION_DB_PATH itself.
+process.env.OMO_SESSION_DB_PATH = join(hermeticHome.home, "no-session-store", "opencode.db")
 
 let isGlobalMockCleanup = false
 const { restoreModuleMocks } = installModuleMockLifecycle(mock, {

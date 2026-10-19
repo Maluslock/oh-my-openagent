@@ -49,6 +49,14 @@ const RAW_PROMPT_ALLOWLIST = new Map<string, string>([
     "binds SDK Session.promptAsync into a narrow facade consumed only by gate-routed unstable-agent-babysitter dispatch; performs no direct dispatch itself",
   ],
   [
+    path.join(SOURCE_ROOT, "v2", "client-shim.ts"),
+    "implements the V1 client surface (session.prompt/.promptAsync) that the shared gate dispatches into on OpenCode V2, where no V1 SDK client object exists; it makes no dispatch decision and every omo caller reaches it through dispatchInternalPrompt",
+  ],
+  [
+    path.join(SOURCE_ROOT, "v2", "command-delivery.ts"),
+    "delivers a USER-initiated slash command (the user typed it, the host invoked our command definition) and forwards the host's own delivery decision verbatim, so it is not internal message injection; routing it through the gate could drop the user's own command",
+  ],
+  [
     path.join(WORKSPACE_ROOT, "packages", "senpi-task", "src", "runners", "in-process", "child-handle.ts"),
     "drives a senpi CHILD AgentSession.prompt for spawned subagent turns; senpi-task cannot reach OpenCode session APIs (opencode-coupling audit) so the main-session injection invariant does not apply",
   ],

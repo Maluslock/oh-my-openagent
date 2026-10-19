@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getLocale, initI18n, t } from "../shared/i18n"
-import { PLUGIN_NAME } from "../shared"
+import { PLUGIN_NAME, getOpenCodeVersion, setVersionCache } from "../shared"
 import { createPluginModule } from "./create-plugin-module"
 
 const sourcePlugin = new URL("../index.ts", import.meta.url).href
@@ -171,7 +171,9 @@ describe("createPluginModule()", () => {
 
   describe("#given OpenCode server config is present", () => {
     it("#then startup self-heals the matching TUI plugin entry", async () => {
-      // given
+      // given a 1.x host, whose client config is tui.json
+      const previousVersion = getOpenCodeVersion()
+      setVersionCache("1.5.0")
       const originalConfigDir = process.env.OPENCODE_CONFIG_DIR
       const configDir = mkdtempSync(join(tmpdir(), "omo-server-tui-entry-"))
       process.env.OPENCODE_CONFIG_DIR = configDir
@@ -190,6 +192,40 @@ describe("createPluginModule()", () => {
         // then
         expect(readFileSync(join(configDir, "tui.json"), "utf-8")).toContain(`"${PLUGIN_NAME}"`)
       } finally {
+        setVersionCache(previousVersion)
+        rmSync(configDir, { recursive: true, force: true })
+        if (originalConfigDir === undefined) {
+          delete process.env.OPENCODE_CONFIG_DIR
+        } else {
+          process.env.OPENCODE_CONFIG_DIR = originalConfigDir
+        }
+      }
+    })
+
+    it("#then startup self-heals the entry in cli.json on a 2.x host", async () => {
+      // given a 2.x host, whose client config is the global cli.json
+      const previousVersion = getOpenCodeVersion()
+      setVersionCache("2.0.11")
+      const originalConfigDir = process.env.OPENCODE_CONFIG_DIR
+      const configDir = mkdtempSync(join(tmpdir(), "omo-server-cli-entry-"))
+      process.env.OPENCODE_CONFIG_DIR = configDir
+      writeFileSync(join(configDir, "opencode.json"), JSON.stringify({ plugin: [PLUGIN_NAME] }), "utf-8")
+
+      try {
+        const pluginModule = createTestPluginModule()
+        mockLoadPluginConfig.mockReturnValue({})
+
+        // when
+        await pluginModule.server({
+          directory: "/tmp/project",
+          client: {},
+        } as Parameters<typeof pluginModule.server>[0])
+
+        // then the entry lands in cli.json, not tui.json
+        const written = JSON.parse(readFileSync(join(configDir, "cli.json"), "utf-8"))
+        expect(written.plugins).toContain(PLUGIN_NAME)
+      } finally {
+        setVersionCache(previousVersion)
         rmSync(configDir, { recursive: true, force: true })
         if (originalConfigDir === undefined) {
           delete process.env.OPENCODE_CONFIG_DIR
@@ -200,7 +236,9 @@ describe("createPluginModule()", () => {
     })
 
     it("#given sidebar is disabled #then startup still writes the TUI entry for BTW", async () => {
-      // given
+      // given a 1.x host, whose client config is tui.json
+      const previousVersion = getOpenCodeVersion()
+      setVersionCache("1.5.0")
       const originalConfigDir = process.env.OPENCODE_CONFIG_DIR
       const configDir = mkdtempSync(join(tmpdir(), "omo-server-tui-disabled-"))
       process.env.OPENCODE_CONFIG_DIR = configDir
@@ -219,6 +257,7 @@ describe("createPluginModule()", () => {
         // then
         expect(readFileSync(join(configDir, "tui.json"), "utf-8")).toContain(`"${PLUGIN_NAME}"`)
       } finally {
+        setVersionCache(previousVersion)
         rmSync(configDir, { recursive: true, force: true })
         if (originalConfigDir === undefined) {
           delete process.env.OPENCODE_CONFIG_DIR

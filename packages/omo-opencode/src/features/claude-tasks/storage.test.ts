@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { tmpdir } from "os"
 import { join, basename } from "path"
 import { z } from "zod"
 import { getOpenCodeConfigDir } from "../../shared/opencode-config-dir"
@@ -8,6 +9,7 @@ import {
   readJsonSafe,
   writeJsonAtomic,
   acquireLock,
+  acquireLockAsync,
   generateTaskId,
   listTaskFiles,
   resolveTaskListId,
@@ -594,5 +596,42 @@ describe("acquireLock", () => {
 
     //#then
     expect(existsSync(join(dirPath, ".lock"))).toBe(false)
+  })
+})
+
+describe("acquireLockAsync", () => {
+  test("waits for a held lock instead of failing, so parallel task writes serialize", async () => {
+    // given a held lock on a fresh task dir
+    const dir = mkdtempSync(join(tmpdir(), "omo-task-lock-"))
+    try {
+      const first = acquireLock(dir)
+      expect(first.acquired).toBe(true)
+
+      // when a second caller asks with a long enough budget
+      const pending = acquireLockAsync(dir, { timeoutMs: 1_000, intervalMs: 10 })
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      first.release()
+      const second = await pending
+
+      // then it acquires rather than reporting contention
+      expect(second.acquired).toBe(true)
+      second.release()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("gives up after the timeout so a stale lock cannot hang a tool call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omo-task-lock-"))
+    try {
+      const held = acquireLock(dir)
+      const start = Date.now()
+      const result = await acquireLockAsync(dir, { timeoutMs: 60, intervalMs: 10 })
+      expect(result.acquired).toBe(false)
+      expect(Date.now() - start).toBeLessThan(1_500)
+      held.release()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
