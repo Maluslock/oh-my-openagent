@@ -36,6 +36,12 @@ Generator/checker note: update this file with the audited component list, then r
 - License: MIT, from package metadata. The inspected package did not include a separate LICENSE file.
 - Copyright: OpenCode contributors.
 - Upstream URL: https://www.npmjs.com/package/@opencode-ai/sdk
+
+### @opencode/plugin@2.0.11
+- License: MIT, from package metadata. The inspected package did not include a separate LICENSE file.
+- Copyright: OpenCode contributors.
+- Upstream URL: https://www.npmjs.com/package/@opencode/plugin
+- Where-bundled: root production dependency for the OpenCode V2 plugin API.
 - Where-bundled: root production dependency for OpenCode API access.
 
 ### @opentui/core@0.5.8
