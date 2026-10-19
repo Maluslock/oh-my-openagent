@@ -3,6 +3,7 @@ import { isSqliteBackend } from "../../shared/opencode-storage-detection"
 import { log } from "../../shared"
 import { getFileAllSessions, getFileMainSessions, fileSessionExists, getFileSessionInfo, getFileSessionMessages, getFileSessionTodos, getFileSessionTranscript } from "./file-storage"
 import { getSdkAllSessions, getSdkMainSessions, getSdkSessionMessages, getSdkSessionTodos, sdkSessionExists, shouldFallbackFromSdkError, type GlobalSessionClient } from "./sdk-storage"
+import { getSqliteAllSessionIds, getSqliteMainSessions, sqliteSessionExists } from "./sqlite-storage"
 import type { SessionInfo, SessionMessage, SessionMetadata, TodoItem } from "./types"
 import { describeSessionError } from "./session-error"
 
@@ -47,6 +48,20 @@ function mergeSessionMetadataLists(
   return [...merged.values()].sort((a, b) => b.time.updated - a.time.updated)
 }
 
+/**
+ * Combine the live enumeration sources with the SQLite backfill. Precedence is highest-first, so a
+ * shared id keeps the value from `primary` (or `fileSessions` when the host writes that layout);
+ * `sqliteSessions` only contributes ids nothing live has seen, which is the whole point of reading
+ * the host store: sessions created before omo loaded.
+ */
+function mergeSessionMetadataSources(
+  primary: SessionMetadata[],
+  fileSessions: SessionMetadata[],
+  sqliteSessions: SessionMetadata[],
+): SessionMetadata[] {
+  return mergeSessionMetadataLists(mergeSessionMetadataLists(primary, fileSessions), sqliteSessions)
+}
+
 function mergeSessionIds(sdkSessionIds: string[], fileSessionIds: string[]): string[] {
   return [...new Set([...sdkSessionIds, ...fileSessionIds])]
 }
@@ -54,6 +69,29 @@ function mergeSessionIds(sdkSessionIds: string[], fileSessionIds: string[]): str
 // SDK clients for beta mode
 let sdkClient: PluginInput["client"] | null = null
 let globalSessionClient: GlobalSessionClient | null = null
+
+/**
+ * Enumeration seam for hosts where the SDK client cannot list sessions.
+ *
+ * OpenCode V2 exposes no session listing to server plugins, so `session_list` and the all-sessions
+ * mode of `session_search` would otherwise fall through to the legacy file layout and find nothing
+ * (measured: 0 sessions). The V2 adapter installs an index-backed source here. When it is absent the
+ * pre-existing SDK-then-file behaviour is unchanged, which keeps the V1 host path intact.
+ */
+export type SessionIndexSource = {
+  readonly listMainSessions: (directory?: string) => Promise<SessionMetadata[]>
+  readonly listAllSessionIds: () => Promise<string[]>
+}
+
+let sessionIndexSource: SessionIndexSource | null = null
+
+export function setSessionIndexSource(source: SessionIndexSource | null): void {
+  sessionIndexSource = source
+}
+
+export function resetSessionIndexSource(): void {
+  sessionIndexSource = null
+}
 
 export function setStorageClient(client: PluginInput["client"], globalClient?: GlobalSessionClient): void {
   sdkClient = client
@@ -67,33 +105,59 @@ export function resetStorageClient(): void {
 
 export async function getMainSessions(options: GetMainSessionsOptions): Promise<SessionMetadata[]> {
   const directory = normalizeProjectFilter(options.directory)
+  // Read the host store first: it is the only source that knows sessions from before omo loaded.
+  // It returns [] on a host without a SQLite session table or outside Bun, so this is additive.
+  const sqliteSessions = await getSqliteMainSessions(directory)
+
+  if (sessionIndexSource) {
+    try {
+      const indexed = await sessionIndexSource.listMainSessions(directory)
+      const fileSessions = await getFileMainSessions(directory)
+      return mergeSessionMetadataSources(indexed, fileSessions, sqliteSessions)
+    } catch (error) {
+      log("[session-manager] falling back to the SDK/file session list after the index source failed", { error: String(error) })
+    }
+  }
+
   if (isSqliteBackend() && sdkClient) {
     try {
       const sdkSessions = await getSdkMainSessions(sdkClient, directory, globalSessionClient ?? undefined, options.limit)
       const fileSessions = await getFileMainSessions(directory)
-      return mergeSessionMetadataLists(sdkSessions, fileSessions)
+      return mergeSessionMetadataSources(sdkSessions, fileSessions, sqliteSessions)
     } catch (error) {
       if (!shouldFallbackFromSdkError(error)) throw error
       log("[session-manager] falling back to file session list after SDK unavailable error", { error: describeSessionError(error) })
     }
   }
 
-  return getFileMainSessions(directory)
+  return mergeSessionMetadataSources([], await getFileMainSessions(directory), sqliteSessions)
 }
 
 export async function getAllSessions(limit?: number): Promise<string[]> {
+  const sqliteIds = await getSqliteAllSessionIds()
+
+  if (sessionIndexSource) {
+    try {
+      const indexed = await sessionIndexSource.listAllSessionIds()
+      const fileSessionIds = await getFileAllSessions()
+      return mergeSessionIds(mergeSessionIds(indexed, fileSessionIds), sqliteIds)
+    } catch (error) {
+      log("[session-manager] falling back to the SDK/file session ids after the index source failed", { error: String(error) })
+    }
+  }
+
   if (isSqliteBackend() && sdkClient) {
     try {
       const sdkSessionIds = await getSdkAllSessions(sdkClient, globalSessionClient ?? undefined, limit)
       const fileSessionIds = await getFileAllSessions()
-      return mergeSessionIds(sdkSessionIds, fileSessionIds)
+      return mergeSessionIds(mergeSessionIds(sdkSessionIds, fileSessionIds), sqliteIds)
     } catch (error) {
       if (!shouldFallbackFromSdkError(error)) throw error
       log("[session-manager] falling back to file session ids after SDK unavailable error", { error: describeSessionError(error) })
     }
   }
 
-  return getFileAllSessions()
+  return mergeSessionIds(await getFileAllSessions(), sqliteIds)
 }
 
 export { getMessageDir } from "../../shared/opencode-message-dir"
@@ -108,7 +172,11 @@ export async function sessionExists(sessionID: string): Promise<boolean> {
       log("[session-manager] reading file sessionExists after SDK error", { error: describeSessionError(error), sessionID })
     }
   }
-  return fileSessionExists(sessionID)
+  if (await fileSessionExists(sessionID)) return true
+  // Last resort: a session the host store knows about but that omo never observed and that has no
+  // message directory on disk (the V2 layout). Without this, `session_read` reports "Session not
+  // found" for exactly the sessions the backfill just listed.
+  return sqliteSessionExists(sessionID)
 }
 
 export async function readSessionMessages(sessionID: string): Promise<SessionMessage[]> {
