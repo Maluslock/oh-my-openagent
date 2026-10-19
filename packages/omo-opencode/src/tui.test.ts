@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -227,5 +227,121 @@ describe("TUI sidebar polling", () => {
     const thrownValue = "bad poll state"
 
     expect(() => handleTuiPollError(thrownValue)).toThrow(thrownValue)
+  })
+})
+
+describe("TUI sidebar on the OpenCode 2.x CLI plugin API", () => {
+  let tempDir = ""
+  let envSnapshot: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    // Config discovery is env-driven, so isolate it instead of inheriting whatever config state a
+    // previously-run suite left behind (which would decide whether `setup` proceeds).
+    envSnapshot = {}
+    for (const key of ["HOME", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"]) {
+      envSnapshot[key] = process.env[key]
+    }
+    tempDir = mkdtempSync(join(tmpdir(), "omo-tui-v2-test-"))
+    process.env.HOME = tempDir
+    process.env.OPENCODE_CONFIG_DIR = join(tempDir, "config")
+    process.env.XDG_CONFIG_HOME = join(tempDir, "xdg-config")
+    mkdirSync(process.env.OPENCODE_CONFIG_DIR, { recursive: true })
+    mkdirSync(process.env.XDG_CONFIG_HOME, { recursive: true })
+    mkdirSync(join(tempDir, ".omo"), { recursive: true })
+    mock.module("@opentui/solid", () => ({
+      createElement: (tag: string): SolidNode => ({ tag, props: {}, children: [] }),
+      insert: (parent: SolidNode, child: unknown): void => {
+        parent.children.push(child)
+      },
+      setProp: (node: SolidNode, name: string, value: unknown): void => {
+        node.props[name] = value
+      },
+    }))
+  })
+
+  afterEach(() => {
+    mock.restore()
+    rmSync(tempDir, { recursive: true, force: true })
+    for (const [key, value] of Object.entries(envSnapshot)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  it("#given one module for both hosts #when the default export is read #then it carries the 1.x and 2.x entrypoints", () => {
+    // given / when / then
+    expect(tuiModule.id).toBe("oh-my-openagent:tui")
+    expect(tuiModule.tui).toBeFunction()
+    expect(tuiModule.setup).toBeFunction()
+  })
+
+  it("#given the 2.x setup runs #when it registers the sidebar #then it claims sidebar.content and its cleanup releases everything", async () => {
+    // given a fake 2.x context whose storage.memory is a plain store
+    const claims: Array<{ append?: string; render: () => unknown }> = []
+    let releasedSlots = 0
+    let store: { view: unknown } | undefined
+    const context = {
+      location: { directory: tempDir },
+      theme: {},
+      ui: {
+        slot: (claim: { append?: string; render: () => unknown }): (() => void) => {
+          claims.push(claim)
+          return () => {
+            releasedSlots += 1
+          }
+        },
+      },
+      storage: {
+        memory: (_key: string, options: { initial: { view: unknown } }) => {
+          store = options.initial
+          return [store, (mutation: (draft: { view: unknown }) => void) => mutation(store!)] as const
+        },
+      },
+      data: { location: { default: () => ({ directory: tempDir }) } },
+    }
+
+    // when
+    const cleanup = await tuiModule.setup(context as unknown as Parameters<typeof tuiModule.setup>[0])
+
+    // then the slot is claimed with append placement and a render function
+    expect(claims).toHaveLength(1)
+    expect(claims[0]?.append).toBe("sidebar.content")
+    expect(claims[0]?.render).toBeFunction()
+    expect((claims[0]?.render() as SolidNode | undefined)?.tag).toBe("box")
+
+    // and the returned cleanup stops whoever owns the subscription
+    expect(cleanup).toBeFunction()
+    cleanup?.()
+    expect(releasedSlots).toBe(1)
+  })
+
+  it("#given the sidebar is disabled in config #when the 2.x setup runs #then it claims no slot", async () => {
+    // given a real config file that turns the sidebar off (no shared-module mocking: that leaks
+    // into every other suite that reads config)
+    writeFileSync(
+      join(tempDir, ".omo", "omo.jsonc"),
+      JSON.stringify({ "[opencode]": { tui: { sidebar: { enabled: false } } } }),
+      "utf-8",
+    )
+    const claims: unknown[] = []
+    const context = {
+      location: { directory: tempDir },
+      theme: {},
+      ui: {
+        slot: (claim: unknown): (() => void) => {
+          claims.push(claim)
+          return () => undefined
+        },
+      },
+      storage: { memory: () => [{ view: {} }, () => undefined] as const },
+      data: { location: { default: () => ({ directory: tempDir }) } },
+    }
+
+    // when
+    const cleanup = await tuiModule.setup(context as unknown as Parameters<typeof tuiModule.setup>[0])
+
+    // then
+    expect(claims).toEqual([])
+    expect(cleanup).toBeUndefined()
   })
 })

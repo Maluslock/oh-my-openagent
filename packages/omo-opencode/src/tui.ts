@@ -1,4 +1,8 @@
 import type { TuiPluginModule } from "@opencode-ai/plugin/tui"
+// Type-only on purpose: OpenCode 2.x resolves this package at runtime for CLI plugins, but a 1.x
+// host must not need it. `Plugin.define` is an identity helper in 2.0.11, so the definition object
+// below is built directly under its type instead of importing the helper as a value.
+import type { Plugin as CliPlugin } from "@opencode/plugin/tui"
 
 import { registerBtwSideTui } from "./features/btw-side"
 import { registerNativeEditionNudgeTui } from "./features/native-edition-nudge"
@@ -18,6 +22,9 @@ type SolidRuntime<Node> = {
   readonly insert: (parent: Node, child: Node | string) => unknown
   readonly setProp: (node: Node, name: string, value: unknown) => unknown
 }
+
+/** Same id for both host generations: 1.x reads `tui`, 2.x reads `setup`. */
+const TUI_PLUGIN_ID = "oh-my-openagent:tui"
 
 type SidebarSlotRegistration<Node> = {
   readonly order: number
@@ -117,8 +124,62 @@ export function handleTuiPollError(
   throw error
 }
 
-const module: TuiPluginModule = {
-  id: "oh-my-openagent:tui",
+type SidebarViewPolling = {
+  readonly start: () => void
+  readonly stop: () => void
+}
+
+/**
+ * Shared sidebar poller. 1.x drives a manual re-render through `onViewChanged`; 2.x writes the view
+ * into a reactive store instead, so the slot re-renders when it reads the new value.
+ */
+function createSidebarViewPolling(input: {
+  readonly directory: string
+  readonly initialView: SidebarView
+  readonly onViewChanged: (view: SidebarView) => void
+  readonly onError: (error: unknown) => void
+}): SidebarViewPolling {
+  let currentKey = viewKey(input.initialView)
+  let disposed = false
+  let inFlight = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  const schedule = (): void => {
+    timer = setTimeout(tick, POLL_INTERVAL_MS)
+  }
+
+  const tick = async (): Promise<void> => {
+    if (disposed || inFlight) {
+      if (!disposed) schedule()
+      return
+    }
+    inFlight = true
+    try {
+      const nextView = await readView(input.directory)
+      const nextKey = viewKey(nextView)
+      if (nextKey !== currentKey) {
+        currentKey = nextKey
+        input.onViewChanged(nextView)
+      }
+    } catch (error) {
+      input.onError(error)
+    } finally {
+      inFlight = false
+      if (!disposed) schedule()
+    }
+  }
+
+  return {
+    start: schedule,
+    stop: () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    },
+  }
+}
+
+const v1Module: TuiPluginModule = {
+  id: TUI_PLUGIN_ID,
   tui: async (api) => {
     // The TUI plugin runs on OpenCode's main thread, the only thread that
     // emits `exit`; it applies a sandbox refresh the server plugin requested.
@@ -147,10 +208,6 @@ const module: TuiPluginModule = {
     }
 
     let currentView = await readView(directory)
-    let currentKey = viewKey(currentView)
-    let disposed = false
-    let inFlight = false
-    let timer: ReturnType<typeof setTimeout> | null = null
 
     registerSidebarContentSlot({
       registerSlot: (registration) => {
@@ -162,38 +219,70 @@ const module: TuiPluginModule = {
       renderSidebar: () => materialize(buildViewNodes(currentView, api.theme.current), solid),
     })
 
-    const schedule = (): void => {
-      timer = setTimeout(tick, POLL_INTERVAL_MS)
-    }
-
-    const tick = async (): Promise<void> => {
-      if (disposed || inFlight) {
-        if (!disposed) schedule()
-        return
-      }
-      inFlight = true
-      try {
-        const nextView = await readView(directory)
-        const nextKey = viewKey(nextView)
-        if (nextKey !== currentKey) {
-          currentView = nextView
-          currentKey = nextKey
-          api.renderer.requestRender()
-        }
-      } catch (error) {
-        handleTuiPollError(error)
-      } finally {
-        inFlight = false
-        if (!disposed) schedule()
-      }
-    }
-
-    schedule()
-    api.lifecycle.onDispose(() => {
-      disposed = true
-      if (timer) clearTimeout(timer)
+    const polling = createSidebarViewPolling({
+      directory,
+      initialView: currentView,
+      onViewChanged: (nextView) => {
+        currentView = nextView
+        api.renderer.requestRender()
+      },
+      onError: handleTuiPollError,
     })
+
+    polling.start()
+    api.lifecycle.onDispose(polling.stop)
   },
 }
 
-export default module
+/**
+ * OpenCode 2.x CLI plugin definition: the same sidebar on the `sidebar.content` slot.
+ *
+ * `context.storage.memory` is the reactive source, so the poller no longer requests a render itself.
+ */
+function createV2TuiDefinition(): CliPlugin.Definition {
+  return {
+    id: TUI_PLUGIN_ID,
+    async setup(context) {
+      const solid = await import("@opentui/solid").catch(() => null)
+      if (!solid) {
+        return
+      }
+
+      const directory = context.location?.directory ?? context.data.location.default().directory
+      if ((await loadPluginValidation(directory)).config.tui?.sidebar?.enabled === false) {
+        return
+      }
+
+      const [sidebarState, updateSidebarState] = context.storage.memory("sidebar-view", {
+        initial: { view: await readView(directory) },
+      })
+
+      // `@opentui/solid`'s imperative node construction produces the node type JSX compiles to;
+      // 2.x types slot render as JSX, so the cast is the typing equivalent of returning JSX.
+      const claim = {
+        append: "sidebar.content",
+        render: () => materialize(buildViewNodes(sidebarState.view, context.theme), solid),
+      } as unknown as Parameters<CliPlugin.Context["ui"]["slot"]>[0]
+      const releaseSlot = context.ui.slot(claim)
+
+      const polling = createSidebarViewPolling({
+        directory,
+        initialView: sidebarState.view,
+        onViewChanged: (nextView) => {
+          updateSidebarState((draft) => {
+            draft.view = nextView
+          })
+        },
+        onError: handleTuiPollError,
+      })
+
+      polling.start()
+      return () => {
+        polling.stop()
+        releaseSlot()
+      }
+    },
+  }
+}
+
+export default { ...v1Module, ...createV2TuiDefinition() }
